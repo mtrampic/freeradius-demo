@@ -15,8 +15,8 @@ Parameters:
     Type: AWS::EC2::VPC::Id
     Description: CodeBuild VPC
 
-  CodeBuildVPCSubnets:
-    Type: List<AWS::EC2::Subnet::Id>
+  CodeBuildVPCSubnet:
+    Type: AWS::EC2::Subnet::Id
     Description: List of CodeBuild subnets within VPC.
 
 Resources:
@@ -237,8 +237,8 @@ Resources:
         BuildSpec: buildspec.yml
       VpcConfig:
         VpcId: !Ref CodeBuildVPC
-        Subnets: !Ref CodeBuildVPCSubnets
-        SecurityGroupIds: [!Ref CodeBuildSecurityGroup]
+        Subnets: [ !Ref CodeBuildVPCSubnet ]
+        SecurityGroupIds: [ !Ref CodeBuildSecurityGroup ]
 
   CodeBuildRole:
     Type: AWS::IAM::Role
@@ -305,7 +305,8 @@ Resources:
               - ec2:CreateNetworkInterfacePermission
             Condition:
               StringEquals:
-                ec2:Subnet: !Ref CodeBuildVPCSubnets
+                ec2:Subnet: 
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${CodeBuildVPCSubnet}"
                 ec2:AuthorizedService: codebuild.amazonaws.com
 
   CodeBuildLogGroup: 
@@ -342,7 +343,7 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def handler(event, context):
-              logger.info('got event {}'.format(event))
+              logger.info('Got event {}'.format(event))
               responseData = {}
 
               if event['RequestType'] == 'Delete':
@@ -356,29 +357,21 @@ Resources:
                       status = exc.response["ResponseMetadata"]["HTTPStatusCode"]
                       errcode = exc.response["Error"]["Code"]
                       if status == 404:
-                          logger.error(f'INFO:  ${CodePipelineArtifactStoreBucket} - {errcode}')
+                          logger.error(f'INFO: ${CodePipelineArtifactStoreBucket} - {errcode}')
                       else:
                           logger.error(f'ERROR: ${CodePipelineArtifactStoreBucket} - {errcode}')
                   except Exception as exc:
                       logger.error(f'ERROR: ${CodePipelineArtifactStoreBucket} Error: {exc}')
-              
               else:
-                  # Initialize a PoolManager instance for sending requests.
                   http = urllib3.PoolManager()
-
-                  # Send a GET request to the URL and receive the response.
                   r = http.request('GET', '${GitHubRepoClone}')
-
-                  # Open a file in binary write mode and save the content of the response.
                   with open('/tmp/src.zip', 'wb') as f:
-                      f.write(r.data)  # Use r.data to access the response body
-                  
-                  # Extract, then re-zip without the top-level folder
+                      f.write(r.data)
+
                   with zipfile.ZipFile('/tmp/src.zip', 'r') as zip_ref:
                       zip_ref.extractall('/tmp/extracted')
-                  
-                  # Remove the top-level directory while preserving the structure
-                  top_level_folder = '/tmp/extracted/freeradius-demo-main'  # Adjust if necessary
+
+                  top_level_folder = '/tmp/extracted/freeradius-demo-main'
                   for item in os.listdir(top_level_folder):
                       s = os.path.join(top_level_folder, item)
                       d = os.path.join('/tmp/extracted', item)
@@ -386,21 +379,23 @@ Resources:
                           shutil.move(s, d)
                       else:
                           shutil.copy2(s, d)
-                        # Re-zip the contents without the top-level folder
+
                   with zipfile.ZipFile('/tmp/final_src.zip', 'w') as zipf:
                       for root, dirs, files in os.walk('/tmp/extracted'):
                           for file in files:
-                              # Avoid including the original top-level folder
                               if not root.startswith(top_level_folder):
-                                  zipf.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), '/tmp/extracted'))
+                                  zipf.write(os.path.join(root, file), 
+                                             os.path.relpath(os.path.join(root, file), '/tmp/extracted'))
 
-                  # Use boto3 to upload the file to S3 with server-side encryption.
                   s3 = boto3.resource('s3')
-                  s3.meta.client.upload_file('/tmp/final_src.zip', '${CodePipelineArtifactStoreBucket}', 'src.zip', ExtraArgs={'ServerSideEncryption': 'aws:kms',
-                      'SSEKMSKeyId': 'alias/aws/s3'})
+                  s3.meta.client.upload_file('/tmp/final_src.zip', 
+                                             '${CodePipelineArtifactStoreBucket}', 'src.zip', 
+                                             ExtraArgs={'ServerSideEncryption': 'aws:kms',
+                                                        'SSEKMSKeyId': 'alias/aws/s3'})
 
               logger.info('responseData {}'.format(responseData))
               cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "SeedCode")
+
 
       Handler: 'index.handler'
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -450,6 +445,7 @@ Resources:
             - s3:ListBucketVersions
 
 Outputs:
+  
   CodeCommitRepository:
     Value: !GetAtt CodeCommitRepository.Name
 
