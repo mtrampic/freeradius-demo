@@ -1,0 +1,463 @@
+
+Parameters: 
+  
+  GitHubRepoClone: 
+    Type: String
+    Description: Public Repository whose ZIP will be copied and put into S3 for first CodeCommit repo sample code.
+    Default: 'https://github.com/mtrampic/freeradius-demo/archive/refs/heads/main.zip'
+  
+  RepositoryName:
+    Type: String
+    Description: This will be name of CodeCommit and ECR Repository. 
+    Default: freeradius-docker
+  
+  CodeBuildVPC:
+    Type: AWS::EC2::VPC::Id
+    Description: CodeBuild VPC
+
+  CodeBuildVPCSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of CodeBuild subnets within VPC.
+
+Resources:
+  
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    DependsOn: S3Seed
+    Properties: 
+      RepositoryName: !Ref RepositoryName
+      Code:
+        BranchName: master
+        S3: 
+          Bucket: !Ref CodePipelineArtifactStoreBucket
+          Key: src.zip
+
+  ImageRepository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      EmptyOnDelete: "true"
+      RepositoryName: !Ref RepositoryName
+      ImageScanningConfiguration: 
+        ScanOnPush: "true"
+
+  CodePipelineArtifactStoreBucket:
+    Type: 'AWS::S3::Bucket'
+
+  CodePipelineArtifactStoreBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CodePipelineArtifactStoreBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: DenyUnEncryptedObjectUploads
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:PutObject'
+          Resource: !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+          Condition:
+            StringNotEquals:
+              's3:x-amz-server-side-encryption': 'aws:kms'
+        - Sid: DenyInsecureConnections
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:*'
+          Resource: !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+          Condition:
+            Bool:
+              'aws:SecureTransport': false
+
+  AmazonCloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - events.amazonaws.com
+          Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+      - PolicyName: cwe-pipeline-execution
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action: 'codepipeline:StartPipelineExecution'
+            Resource: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DockerPipeline}'
+
+  AmazonCloudWatchEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+        - aws.codecommit
+        detail-type:
+        - CodeCommit Repository State Change
+        resources:
+        - !GetAtt CodeCommitRepository.Arn
+        detail:
+          event:
+          - referenceCreated
+          - referenceUpdated
+          referenceType:
+          - branch
+          referenceName:
+          - master
+      Targets:
+      - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DockerPipeline}'
+        RoleArn: !GetAtt AmazonCloudWatchEventRole.Arn
+        Id: codepipeline-DockerPipeline
+
+  DockerPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Ref RepositoryName
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+          - Name: SourceAction
+            ActionTypeId:
+              Category: Source
+              Owner: AWS
+              Version: '1'
+              Provider: CodeCommit
+            OutputArtifacts:
+            - Name: Source
+            Configuration:
+              BranchName: master
+              RepositoryName: !GetAtt CodeCommitRepository.Name
+              PollForSourceChanges: false
+            RunOrder: 1
+        - Name: Build
+          Actions:
+          - Name: Build
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: '1'
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: Source
+            Configuration:
+              ProjectName: !Ref CodeBuildProject
+              EnvironmentVariables: !Sub |
+                [{
+                  "name": "IMAGE_REPO_NAME",
+                  "type": "PLAINTEXT",
+                  "value": "${ImageRepository}"
+                }]
+            RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactStoreBucket
+
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - codepipeline.amazonaws.com
+          Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+      - PolicyName: AWS-CodePipeline
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'codecommit:CancelUploadArchive'
+            - 'codecommit:GetBranch'
+            - 'codecommit:GetCommit'
+            - 'codecommit:GetUploadArchiveStatus'
+            - 'codecommit:UploadArchive'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'codebuild:BatchGetBuilds'
+            - 'codebuild:StartBuild'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'lambda:InvokeFunction'
+            - 'lambda:ListFunctions'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'iam:PassRole'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'cloudwatch:*'
+            - 's3:*'
+            Resource: '*'
+
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Codebuild Security Group
+      GroupDescription: 'CodeBuild SecurityGroup'
+      VpcId: !Ref CodeBuildVPC
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+        ImagePullCredentialsType: CODEBUILD
+        EnvironmentVariables:
+        - Name: AWS_ACCOUNT_ID
+          Type: PLAINTEXT
+          Value: !Ref AWS::AccountId
+      ServiceRole: !Ref CodeBuildRole
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref CodeBuildLogGroup
+          Status: ENABLED
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      VpcConfig:
+        VpcId: !Ref CodeBuildVPC
+        Subnets: !Ref CodeBuildVPCSubnets
+        SecurityGroupIds: [!Ref CodeBuildSecurityGroup]
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: AWS-CodeBuild
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Resource:
+            - !GetAtt CodeBuildLogGroup.Arn
+            - !Sub '${CodeBuildLogGroup.Arn}:*'
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          - Effect: Allow
+            Resource:
+            - !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketAcl
+            - s3:GetBucketLocation
+          - Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:CompleteLayerUpload
+            - ecr:GetAuthorizationToken
+            - ecr:InitiateLayerUpload
+            - ecr:PutImage
+            - ecr:UploadLayerPart
+            - ecr:GetDownloadUrlForLayer
+            - ecr:BatchGetImage
+            Resource: "*"
+            Effect: Allow
+      - PolicyName: AWS-CodeBuild-VPC
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Resource:
+              - "*"
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeDhcpOptions
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+          - Effect: Allow
+            Resource:
+              - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+            Action:
+              - ec2:CreateNetworkInterfacePermission
+            Condition:
+              StringEquals:
+                ec2:Subnet: !Ref CodeBuildVPCSubnets
+                ec2:AuthorizedService: codebuild.amazonaws.com
+
+  CodeBuildLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 7
+
+  S3Seed:
+    Type: Custom::S3Seed
+    Properties:
+      ServiceToken: !GetAtt S3SeedFunction.Arn
+      Region: !Ref AWS::Region
+  
+  S3SeedFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${S3SeedFunction}'
+      RetentionInDays: 14
+
+  S3SeedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          import logging
+          import boto3
+          import urllib3
+          import cfnresponse
+          import zipfile
+          import os
+          import shutil
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              logger.info('got event {}'.format(event))
+              responseData = {}
+
+              if event['RequestType'] == 'Delete':
+                  try:
+                      s3 = boto3.resource('s3')
+                      bucket = s3.Bucket('${CodePipelineArtifactStoreBucket}')
+                      logger.info('Deleting objects in {}...'.format('${CodePipelineArtifactStoreBucket}'))
+                      bucket.object_versions.delete()
+                      logger.info('Done! All objects deleted from s3://{}.'.format('${CodePipelineArtifactStoreBucket}'))
+                  except botocore.exceptions.ClientError as exc:
+                      status = exc.response["ResponseMetadata"]["HTTPStatusCode"]
+                      errcode = exc.response["Error"]["Code"]
+                      if status == 404:
+                          logger.error(f'INFO:  ${CodePipelineArtifactStoreBucket} - {errcode}')
+                      else:
+                          logger.error(f'ERROR: ${CodePipelineArtifactStoreBucket} - {errcode}')
+                  except Exception as exc:
+                      logger.error(f'ERROR: ${CodePipelineArtifactStoreBucket} Error: {exc}')
+              
+              else:
+                  # Initialize a PoolManager instance for sending requests.
+                  http = urllib3.PoolManager()
+
+                  # Send a GET request to the URL and receive the response.
+                  r = http.request('GET', '${GitHubRepoClone}')
+
+                  # Open a file in binary write mode and save the content of the response.
+                  with open('/tmp/src.zip', 'wb') as f:
+                      f.write(r.data)  # Use r.data to access the response body
+                  
+                  # Extract, then re-zip without the top-level folder
+                  with zipfile.ZipFile('/tmp/src.zip', 'r') as zip_ref:
+                      zip_ref.extractall('/tmp/extracted')
+                  
+                  # Remove the top-level directory while preserving the structure
+                  top_level_folder = '/tmp/extracted/freeradius-demo-main'  # Adjust if necessary
+                  for item in os.listdir(top_level_folder):
+                      s = os.path.join(top_level_folder, item)
+                      d = os.path.join('/tmp/extracted', item)
+                      if os.path.isdir(s):
+                          shutil.move(s, d)
+                      else:
+                          shutil.copy2(s, d)
+                        # Re-zip the contents without the top-level folder
+                  with zipfile.ZipFile('/tmp/final_src.zip', 'w') as zipf:
+                      for root, dirs, files in os.walk('/tmp/extracted'):
+                          for file in files:
+                              # Avoid including the original top-level folder
+                              if not root.startswith(top_level_folder):
+                                  zipf.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), '/tmp/extracted'))
+
+                  # Use boto3 to upload the file to S3 with server-side encryption.
+                  s3 = boto3.resource('s3')
+                  s3.meta.client.upload_file('/tmp/final_src.zip', '${CodePipelineArtifactStoreBucket}', 'src.zip', ExtraArgs={'ServerSideEncryption': 'aws:kms',
+                      'SSEKMSKeyId': 'alias/aws/s3'})
+
+              logger.info('responseData {}'.format(responseData))
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "SeedCode")
+
+      Handler: 'index.handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: 'python3.12'
+      Timeout: 60
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Resource:
+            - !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketAcl
+            - s3:GetBucketLocation
+            - s3:DeleteObject
+            - s3:DeleteObjectVersion
+          - Effect: Allow
+            Resource:
+            - !Sub '${CodePipelineArtifactStoreBucket.Arn}'
+            Action:
+            - s3:ListBucket
+            - s3:ListBucketVersions
+
+Outputs:
+  CodeCommitRepository:
+    Value: !GetAtt CodeCommitRepository.Name
+
+  CodePipeline:
+    Value: !Ref DockerPipeline
+
+  EcrRepository:
+    Value: !Ref ImageRepository
+
+  PipelineS3Bucket:
+    Value: !Ref CodePipelineArtifactStoreBucket
