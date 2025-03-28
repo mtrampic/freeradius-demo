@@ -31,6 +31,11 @@ Parameters:
       - ARM
       - LINUX
 
+  ECSClusterName:
+    Type: String
+    Description: The name of the ECS cluster to use.
+    Default: ECS-Anywhere
+
 Mappings: 
   CodeBuildTypeMap: 
     ARM:
@@ -39,6 +44,46 @@ Mappings:
       BUILDGENERAL1SMALL: aws/codebuild/amazonlinux2-x86_64-standard:5.0
 
 Resources:
+
+  LoadBalancerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: "LoadBalancer"
+      TaskRoleArn: "arn:aws:iam::421195411089:role/ecsTaskExecutionRole"
+      NetworkMode: "bridge"
+      RequiresCompatibilities:
+        - EXTERNAL
+      Cpu: "256"
+      Memory: "128"
+      ContainerDefinitions:
+        - Name: traefik
+          Image: "public.ecr.aws/docker/library/traefik@sha256:cc11989f418e2cfe5e60fc40c92c1813be847f58eda15eced7d5ac890255ad9e"
+          Cpu: 0
+          PortMappings:
+            - ContainerPort: 1812
+              HostPort: 1812
+              Protocol: udp
+            - ContainerPort: 1813
+              HostPort: 1813
+              Protocol: udp
+          Essential: true
+          Command:
+            - "--providers.ecs.ecsAnywhere=true"
+            - "--providers.ecs.region=eu-central-1"
+            - "--providers.ecs.autoDiscoverClusters=true"
+            - "--providers.ecs.exposedByDefault=true"
+            - "--entrypoints.radius1812.address=:1812/udp"
+            - "--entrypoints.radius1813.address=:1813/udp"
+          Environment: []
+          MountPoints: []
+          VolumesFrom: []
+          DockerLabels:
+            traefik.enable: "false"
+          SystemControls: []
+      Volumes: []
+      PlacementConstraints:
+        - Type: memberOf
+          Expression: "attribute:LoadBalancer == true"
 
   ImageRepository: 
     Type: AWS::ECR::Repository

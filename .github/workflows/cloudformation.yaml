@@ -26,7 +26,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Deploy S3 Terraform S3 backend
-        id: terraform-s3-backend
+        id: cloudformation-codepipeline
         uses: aws-actions/aws-cloudformation-github-deploy@v1
         with:
           name: "codepipeline-freeradius"
