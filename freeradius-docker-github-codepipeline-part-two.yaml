@@ -1,0 +1,330 @@
+
+Parameters: 
+  
+  GitHubRepoClone: 
+    Type: String
+    Description: Public Repository whose ZIP will be copied and put into S3 for first CodeCommit repo sample code.
+    Default: 'https://github.com/mtrampic/freeradius-demo/archive/refs/heads/main.zip'
+  
+  RadiusRepositoryName:
+    Type: String
+    Description: This will be name of CodeCommit and ECR Repository. 
+    Default: freeradius-docker
+  
+  CodeBuildVPC:
+    Type: AWS::EC2::VPC::Id
+    Description: CodeBuild VPC
+
+  CodeBuildVPCSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: List of CodeBuild subnets within VPC.
+
+  CodeStarConnectionArn:
+    Type: String
+    Description: The ARN of the CodeStar connection to use for the source action.
+    Default: arn:aws:codeconnections:us-east-1:123456789012:connection/12345678-1234-1234-1234-123456789012
+
+  CodeStarConnectionRepositoryName:
+    Type: String
+    Description: The name of the ECR repository to create.
+    Default: mtrampic/freeradius-demo
+  
+  CodeBuildType:
+    Type: String
+    Description: The type of CodeBuild project to create.
+    AllowedValues:
+      - ARM
+      - LINUX
+
+Mappings: 
+  CodeBuildTypeMap: 
+    ARM:
+      BUILDGENERAL1SMALL: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+    LINUX:
+      BUILDGENERAL1SMALL: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+
+Resources:
+
+  ImageRepository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      EmptyOnDelete: "true"
+      RepositoryName: !Ref RadiusRepositoryName
+      ImageScanningConfiguration: 
+        ScanOnPush: "true"
+
+  CodePipelineArtifactStoreBucket:
+    Type: 'AWS::S3::Bucket'
+
+  CodePipelineArtifactStoreBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CodePipelineArtifactStoreBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: DenyUnEncryptedObjectUploads
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:PutObject'
+          Resource: !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+          Condition:
+            StringNotEquals:
+              's3:x-amz-server-side-encryption': 'aws:kms'
+        - Sid: DenyInsecureConnections
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:*'
+          Resource: !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+          Condition:
+            Bool:
+              'aws:SecureTransport': false
+
+  AmazonCloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - events.amazonaws.com
+          Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+      - PolicyName: cwe-pipeline-execution
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action: 'codepipeline:StartPipelineExecution'
+            Resource: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DockerPipeline}'
+
+  DockerPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Ref RadiusRepositoryName
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            Push:
+              - Branches:
+                  Includes:
+                    - main
+                FilePaths:
+                  Excludes:
+                    - '**/README.md'
+                    - '**/LICENSE'
+                    - '**/CONTRIBUTING.md'
+            SourceActionName: SourceAction
+      Stages:
+        - Name: Source
+          Actions:
+          - Name: SourceAction
+            ActionTypeId:
+              Category: Source
+              Owner: AWS
+              Version: '1'
+              Provider: CodeStarSourceConnection
+            OutputArtifacts:
+              - Name: Source
+            Configuration:
+              BranchName: main
+              ConnectionArn: !Ref CodeStarConnectionArn
+              FullRepositoryId: !Ref CodeStarConnectionRepositoryName
+            RunOrder: 1
+        - Name: Build
+          Actions:
+          - Name: Build
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: '1'
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: Source
+            Configuration:
+              ProjectName: !Ref CodeBuildProject
+              EnvironmentVariables: !Sub |
+                [{
+                  "name": "IMAGE_REPO_NAME",
+                  "type": "PLAINTEXT",
+                  "value": "${ImageRepository}"
+                }]
+            RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactStoreBucket
+
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - codepipeline.amazonaws.com
+          Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+      - PolicyName: AWS-CodePipeline
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'codecommit:CancelUploadArchive'
+            - 'codecommit:GetBranch'
+            - 'codecommit:GetCommit'
+            - 'codecommit:GetUploadArchiveStatus'
+            - 'codecommit:UploadArchive'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'codebuild:BatchGetBuilds'
+            - 'codebuild:StartBuild'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'lambda:InvokeFunction'
+            - 'lambda:ListFunctions'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'iam:PassRole'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - 'cloudwatch:*'
+            - 's3:*'
+            Resource: '*'
+
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Codebuild Security Group
+      GroupDescription: 'CodeBuild SecurityGroup'
+      VpcId: !Ref CodeBuildVPC
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !FindInMap [CodeBuildTypeMap, !Ref CodeBuildType, BUILDGENERAL1SMALL]
+        Type: !Sub "${CodeBuildType}_CONTAINER"
+        PrivilegedMode: true
+        ImagePullCredentialsType: CODEBUILD
+        EnvironmentVariables:
+        - Name: AWS_ACCOUNT_ID
+          Type: PLAINTEXT
+          Value: !Ref AWS::AccountId
+      ServiceRole: !Ref CodeBuildRole
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref CodeBuildLogGroup
+          Status: ENABLED
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      VpcConfig:
+        VpcId: !Ref CodeBuildVPC
+        Subnets: [ !Ref CodeBuildVPCSubnet ]
+        SecurityGroupIds: [ !Ref CodeBuildSecurityGroup ]
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: AWS-CodeBuild
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Resource:
+            - !GetAtt CodeBuildLogGroup.Arn
+            - !Sub '${CodeBuildLogGroup.Arn}:*'
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          - Effect: Allow
+            Resource:
+            - !Sub '${CodePipelineArtifactStoreBucket.Arn}/*'
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketAcl
+            - s3:GetBucketLocation
+          - Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:CompleteLayerUpload
+            - ecr:GetAuthorizationToken
+            - ecr:InitiateLayerUpload
+            - ecr:PutImage
+            - ecr:UploadLayerPart
+            - ecr:GetDownloadUrlForLayer
+            - ecr:BatchGetImage
+            Resource: "*"
+            Effect: Allow
+      - PolicyName: AWS-CodeBuild-VPC
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Resource:
+              - "*"
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeDhcpOptions
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+          - Effect: Allow
+            Resource:
+              - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+            Action:
+              - ec2:CreateNetworkInterfacePermission
+            Condition:
+              StringEquals:
+                ec2:Subnet: 
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${CodeBuildVPCSubnet}"
+                ec2:AuthorizedService: codebuild.amazonaws.com
+
+  CodeBuildLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 7
+ 
+
+Outputs:
+
+  CodePipeline:
+    Value: !Ref DockerPipeline
+
+  EcrRepository:
+    Value: !Ref ImageRepository
+
+  PipelineS3Bucket:
+    Value: !Ref CodePipelineArtifactStoreBucket

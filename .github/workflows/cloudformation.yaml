@@ -1,0 +1,35 @@
+name: "Cloudformation"
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+      id-token: write   # This is required for requesting the JWT
+      contents: read    # This is required for actions/checkout
+
+jobs:
+  Cloudformation:
+    name: "Cloudformation"
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@master
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          role-session-name: GitHubOIDC
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy S3 Terraform S3 backend
+        id: terraform-s3-backend
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: "codepipeline-freeradius"
+          template: freeradius-docker-github-codepipeline-part-two.yaml
+          no-fail-on-empty-changeset: "1"
+          capabilities: "CAPABILITY_IAM,CAPABILITY_NAMED_IAM"
