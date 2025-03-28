@@ -1,11 +1,6 @@
 
 Parameters: 
   
-  GitHubRepoClone: 
-    Type: String
-    Description: Public Repository whose ZIP will be copied and put into S3 for first CodeCommit repo sample code.
-    Default: 'https://github.com/mtrampic/freeradius-demo/archive/refs/heads/main.zip'
-  
   RadiusRepositoryName:
     Type: String
     Description: This will be name of CodeCommit and ECR Repository. 
