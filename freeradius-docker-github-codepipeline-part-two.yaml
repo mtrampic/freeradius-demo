@@ -187,6 +187,7 @@ Resources:
               Provider: CodeBuild
             InputArtifacts:
             - Name: Source
+            Namespace: BuildVariables
             Configuration:
               ProjectName: !Ref CodeBuildProject
               EnvironmentVariables: !Sub |
