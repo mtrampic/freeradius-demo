@@ -26,7 +26,9 @@ phases:
             - echo Pushing the Docker image...
             - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
             - printf '[{"name":"freeradius-docker","imageUri":"%s"}]' $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION > imageDetail.json
-            - export RedeployTraefik="false"
+            - export TRAEFIK_IMAGE_DETAILS=`cat traefikImageDetails.json | jq .[0].imageUri`
+            - export CURRENT_TRAEFIK_IMAGE=`aws ecs describe-services --service traefik-docker-loadbalancing --cluster ECS-Anywhere --query 'services[].taskDefinition' --output text | xargs -I {} aws ecs describe-task-definition --task-definition {} --query 'taskDefinition.containerDefinitions[0].image'`
+            - export REDEPLOY_TRAEFIK=`[ "$TRAEFIK_IMAGE_DETAILS" != "$CURRENT_TRAEFIK_IMAGE" ]; then echo "true"; else echo "false"; fi`
 artifacts:
   files:
     - imageDetail.json
